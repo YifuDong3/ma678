@@ -1,0 +1,201 @@
+---
+title: "Analysis of mortality rates and various environmental factors"
+author: "Yifu Dong"
+date: "Oct 23, 2018"
+output:
+  pdf_document: default
+---
+
+\newcommand{\mat}[1]{\boldsymbol{#1}} 
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\newcommand{\rv}[1]{\underline{#1}}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,dev="CairoPNG",fig.align = "center", 
+                      fig.width = 5.656, fig.height = 4, global.par = TRUE)
+pacman::p_load("arm","data.table","Cairo","faraway","foreign","ggplot2","alr3","knitr")
+par (mar=c(3,3,2,1), mgp=c(2,.7,0), tck=-.01)
+```
+
+
+
+# Data analysis 
+
+## Analysis of mortality rates and various environmental factors
+
+The folder `pollution` contains mortality rates and various environmental factors from 60 U.S. metropolitan areas from McDonald, G.C. and Schwing, R.C. (1973) 'Instabilities of regression estimates relating air pollution to mortality', Technometrics, vol.15, 463-482. 
+
+Variables, in order:
+
+* PREC   Average annual precipitation in inches
+* JANT   Average January temperature in degrees F
+* JULT   Same for July
+* OVR65  % of 1960 SMSA population aged 65 or older
+* POPN   Average household size
+* EDUC   Median school years completed by those over 22
+* HOUS   % of housing units which are sound & with all facilities
+* DENS   Population per sq. mile in urbanized areas, 1960
+* NONW   % non-white population in urbanized areas, 1960
+* WWDRK  % employed in white collar occupations
+* POOR   % of families with income < $3000
+* HC     Relative hydrocarbon pollution potential
+* NOX    Same for nitric oxides
+* SO@    Same for sulphur dioxide
+* HUMID  Annual average % relative humidity at 1pm
+* MORT   Total age-adjusted mortality rate per 100,000
+
+For this exercise we shall model mortality rate given nitric oxides, sulfur dioxide, and hydrocarbons as inputs. This model is an extreme oversimplification as it combines all sources of mortality and does not adjust for crucial factors such as age and smoking. We use it to illustrate log transformations in regression.
+
+```{r}
+gelman_dir   <- "http://www.stat.columbia.edu/~gelman/arm/examples/"
+pollution    <- read.dta (paste0(gelman_dir,"pollution/pollution.dta"))
+```
+
+###1. Create a scatterplot of mortality rate versus level of nitric oxides. Do you think linear regression will fit these data well? Fit the regression and evaluate a residual plot from the regression.
+
+```{r}
+plot(pollution$nox,pollution$mort)
+```
+We can know from the figure above that linear regression modelmay be a good model for there data.
+
+```{r}
+regout2 <- lm(pollution$mort~pollution$nox, data=pollution)
+display(regout2)
+```
+
+```{r}
+gelman_dir   <- "http://www.stat.columbia.edu/~gelman/arm/examples/"
+pollution    <- read.dta (paste0(gelman_dir,"pollution/pollution.dta"))
+pollution_clean <- pollution
+par(mfrow=c(2,2))
+plot(regout2)
+plot(pollution$nox,pollution$mort)
+regout2 <- lm(pollution$mort~pollution$nox, data=pollution)
+abline(regout2)
+#overall fit
+marginalModelPlots(regout2,col=rgb(0,0,0,alpha=0.3),col.line = c("green","red"))
+```
+
+
+From the plots of residuals and the relation between this two variables, we cannot say it fits very well. Residuals suffer from heteroschedasticity.**It seems that outliers exist.But we cannot remove them straightly.**
+
+
+
+###2. Find an appropriate transformation that will result in data more appropriate for linear regression. Fit a regression to the transformed data and evaluate the new residual plot.
+
+Actually, the R^square of the model above is only 0.01, which means the relation of two variables is posibly not linear. So we use log to see what happens. 
+```{r}
+regout2_2 <- lm(log(pollution_clean$mort) ~ (pollution_clean$nox), data=pollution_clean)
+display(regout2_2)
+par(mfrow=c(2,2))
+plot(regout2_2)
+```
+The R-Squared is still 0.01, without and improvement.
+
+
+
+```{r}
+regout2_2 <- lm(log(pollution_clean$mort) ~ log(pollution_clean$nox), data=pollution_clean)
+display(regout2_2)
+par(mfrow=c(2,2))
+plot(regout2_2)
+```
+
+From the figures above, the log model fits better, but residuals still suffer from heteroschedasticity. 
+Then we try to regress log(nox) on mort, the result is worse. Now we try another model:
+```{r}
+regout2_2 <- lm(log(pollution_clean$mort) ~ log(pollution_clean$nox)+pollution_clean$nox, data=pollution_clean)
+display(regout2_2)
+par(mfrow=c(2,2))
+plot(regout2_2)
+```
+This model fits much better, although it's still not significant enough for this two variables.
+
+Now we normalize the variables, however,when we normalize the data, it's hard to use log transformation since NaNs exist easier. So we don't choose to normalize data.
+
+
+```{r}
+residualPlots(regout2_2, terms= ~ 1, fitted=TRUE)
+```
+
+Tukey test is not significant, which means that this model is actually still not good enough.
+
+Residuals still suffer from heteroschedasticity.
+
+
+
+###3. Interpret the slope coefficient from the model you chose in 2.
+
+Intercept: The average morality rate when NO equals 0 is $exp(6.77) =871.3119 $
+log(nox):For each 1 difference in nitric oxide , the predicted difference in morality rate is +0.04%
+
+
+###4. Construct 99% confidence interval for slope coefficient from the model you chose in 2 and interpret them.
+
+```{r}
+confint(regout2_2,'log(pollution_clean$nox)',level = 0.99)
+```
+This means that if we fit the model and calculate the slope over and over again, 99% true value of the slope coefficient will be in the interval (0.01378255, 0.06240595)
+
+
+
+###5. Now fit a model predicting mortality rate using levels of nitric oxides, sulfur dioxide, and hydrocarbons as inputs. Use appropriate transformations when helpful. Plot the fitted regression model and interpret the coefficients.
+
+```{r}
+#normalize
+so2n<- (pollution_clean$so2 - mean(pollution_clean$so2)) / (2*sd(pollution_clean$so2))
+hcn<- (pollution_clean$hc - mean(pollution_clean$hc)) / (2*sd(pollution_clean$hc))
+
+#regression
+regout2_5 <- lm(log(pollution_clean$mort)~log(pollution_clean$nox)+so2n+hcn, data=pollution_clean)
+display(regout2_5)
+par(mfrow=c(2,2))
+plot(regout2_5)
+
+```
+
+
+**Before the model above, we tried not to normalize the predictors and tried to add "log" relatively. Finally we found that the model above fits best. So we choose this model.**
+
+Interpretation: 
+
+Intercept: The mortality rate for an individual exposed to average levels of nitric oxides, sulfur dioxide, and hydrocarbons is $exp(6.73) = 837.1473$
+
+log(pollution_clean$nox): 1 standard deviation difference for nitric oxides corresponds to a mortality rate 5% higher.
+
+so2n: 1 standard deviation difference for sulfur dioxide corresponds to $exp(0.03)=1.030455$ increase in mortality rate.
+
+hcn: 1 standard deviation difference in hydrocarbons corresponds to a mortality rate $exp(-0.10) = 0.948374$ times lower, which is a decrease of about 6%.
+
+
+###6. Cross-validate: fit the model you chose above to the first half of the data and then predict for the second half. (You used all the data to construct the model in 4, so this is not really cross-validation, but it gives a sense of how the steps of cross-validation can be implemented.)
+
+```{r}
+#divide the dataset into 2 part: train dataset and predict dataset
+train <-  pollution_clean[1:(nrow(pollution_clean)/2),]
+pred <- pollution_clean[((nrow(pollution_clean)/2)+1):nrow(pollution_clean),]
+
+#normalize choosing the data from training dataset.
+so2n<- (train$so2 - mean(train$so2)) / (2*sd(train$so2))
+hcn<- (train$hc - mean(train$hc)) / (2*sd(train$hc))
+regout2_6 <- lm(log(train$mort)~log(train$nox)+so2n+hcn, data=train)
+display(regout2_6)
+
+```
+
+```{r}
+#predict
+predictions <- predict(regout2_6, pred)
+cbind(predictions=exp(predictions), observed=pred$mort)
+plot(exp(predictions), pred$mort)
+abline(a=0, b=1)
+```
+
+```{r}
+# compute RMSE
+sqrt(mean((pred$mort-exp(predictions))^2))
+#compute R Squared
+summary(regout2_6)["r.squared"] 
+```
+
+

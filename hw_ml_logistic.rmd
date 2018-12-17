@@ -1,0 +1,337 @@
+---
+title: "MA678 homework 09"
+author: "Yifu Dong"
+date: "December 15, 2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,out.width="0.9\\linewidth",dev="pdf",fig.align  = 'center')
+library(ggplot2)
+library(knitr)
+library(gridExtra)
+library(arm)
+library(data.table)
+library(foreign)
+library(car)
+library(stringr)
+library(rstan)
+library(zoo)
+library(tidyverse)
+
+coefplot_my <- function(model){
+  toc <- summary(model)$coef
+  tab <- data.table(toc)
+  tab$coefnames <- rownames(toc)
+  tab<-subset(tab,coefnames!="(Intercept)")
+  ggplot(tab) + geom_point() + 
+    geom_pointrange(aes(ymax = Estimate + 2*`Std. Error` , ymin=Estimate - 2*`Std. Error`),lwd=0.2)+
+    aes( y=Estimate, x=coefnames)+geom_pointrange(aes(ymax = Estimate + `Std. Error` , ymin=Estimate - `Std. Error`))+
+    geom_hline(yintercept=0,lty	=2)+xlab("coefficients")+ylab("estimate +/- 2 Std.Error")+
+    scale_x_discrete(limits=tab$coefnames)+ 
+    coord_flip()
+}
+```
+
+
+# presidential preference and income for the 1992 election
+
+The folder `nes` contains the survey data of presidential preference and income for the 1992 election analyzed in Section 5.1, along with other variables including sex, ethnicity, education, party identification, political ideology, and state.
+
+1. Fit a logistic regression predicting support for Bush given all these inputs except state. Consider how to include these as regression predictors and also consider possible interactions.
+
+```{r,echo=FALSE}
+library(foreign)
+brdata <- read.dta("http://www.stat.columbia.edu/~gelman/arm/examples/nes/nes5200_processed_voters_realideo.dta",convert.factors=F)
+brdata <- brdata[is.na(brdata$black)==FALSE&is.na(brdata$female)==FALSE&is.na(brdata$educ1)==FALSE
+                 &is.na(brdata$age)==FALSE&is.na(brdata$income)==FALSE&is.na(brdata$state)==FALSE,]
+kept.cases <- 1952:2000
+matched.cases <- match(brdata$year, kept.cases)
+keep       <- !is.na(matched.cases)
+data       <- brdata[keep,]
+plotyear   <- unique(sort(data$year))
+year.new   <- match(data$year,unique(data$year))
+n.year     <- length(unique(data$year))
+income.new <- data$income - 3
+age.new    <- (data$age-mean(data$age))/10
+y          <- data$rep_pres_intent
+data       <- cbind(data, year.new, income.new, age.new, y)
+nes.year   <- data[,"year"]
+age.discrete <- as.numeric (cut (data[,"age"], c(0,29.5, 44.5, 64.5, 200)))
+race.adj     <- ifelse (data[,"race"]>=3, 1.5, data[,"race"])
+data        <- cbind (data, age.discrete, race.adj)
+
+data$female <- data[,"gender"] - 1
+data$black <- ifelse (data[,"race"]==2, 1, 0)
+data$rvote <- ifelse (data[,"presvote"]==1, 0, ifelse(data[,"presvote"]==2, 1, NA))
+
+```
+
+First we fit the model using "glm":
+```{r}
+
+#cleaning data
+data <- data%>%filter(data$vote==1|data$vote==2)
+data$vote <- data$vote-1
+#fit a model
+m2 <- glm(vote ~  race + educ1 +income+age+partyid7 +dem_therm, data=data, family=binomial(link="logit"))
+summary(m2)
+```
+
+We found that the residual deviance drops from 9568 to 8554, while the change of degree of freedom is 7. Thus this model is significantly better than null model. Also 5 predictors are significant. So this model fits not bad. 
+
+Now we're going to add interaction and other effective predictors into our model, do some transformation to make the model better:
+```{r}
+m3 <-  glm(vote ~ race +urban+dem_therm+real_ideo+ ideo_feel+partyid7 +rep_therm+ideo_feel*real_ideo+female*educ1, data=data, family=binomial(link="logit"))
+summary(m3)
+
+binnedplot(predict(m3),resid(m3,type = "response"))
+```
+
+We found the AIC of this model is 4690.3, much less than that of the previous model. Also, the residual deviance drops down from 4930.7 to 4666.  
+
+From the binned plot, we find that most of the points are in the interval. Hence, we choose the third model as our chosen model.
+ 
+
+2.  Now formulate a model predicting support for Bush given the same inputs but allowing the intercept to vary over state. Fit using `lmer()` and discuss your results.
+
+Now we're going to add random effect to our model:
+```{r,echo=FALSE}
+m4 <-  lmer(vote ~ race +urban+dem_therm+real_ideo+ ideo_feel+partyid7 +rep_therm+ideo_feel*real_ideo+female*educ1+(1|state), data=data)
+summary(m4)
+
+
+plot(m4,type=c("p","smooth") )##fitted vs  residual
+binnedplot(predict(m4),resid(m4,type = "response"))
+
+AIC(m4)
+anova(m4)
+
+```
+
+From the summary of the Mixed Effect Model, we found that the AIC of this model is 3514.136. But from the binned plot, we find that more points are outside of the interval. 
+
+For the Analysis of Variance Table, it's clear that the predictors which are significant in the Mixed Effect Model is still significant in the Logistic model. The predictors which are not significant in the Mixed Effect Model is still not significant in the Logistic model.  
+
+
+3. Create graphs of the probability of choosing Bush given the linear predictor associated with your model separately for each of eight states as in Figure 14.2.
+
+```{r,echo=FALSE}
+simvals <- simulate(m4,nsim=3)
+```
+
+
+
+## Three-level logistic regression: 
+
+the folder `rodents` contains data on rodents in a sample of New York City apartments.
+
+1. Build a varying intercept logistic regression model (varying over buildings) to predict the presence of rodents (the variable rodent2 in the dataset) given indicators for the ethnic groups (race) as well as other potentially relevant predictors describing the apartment and building. Fit this model using lmer() and interpret the coefficients at both levels.
+
+```{r,echo=FALSE}
+apt.subset.data <- read.table ("http://www.stat.columbia.edu/~gelman/arm/examples/rodents/rodents.dat", header=TRUE)
+apt_dt <- data.table(apt.subset.data)
+
+invisible(apt_dt[,asian := race==5 | race==6 | race==7])
+invisible(apt_dt[,black := race==2])
+invisible(apt_dt[,hisp  := race==3 | race==4])
+
+#choosing appropriate predictors
+m5 <- lmer(rodent2~race+personrm+cd+vacrate+housewgt+regext+totincom2+struct+dilap+(1|bldg),data=apt_dt)
+summary(m5)
+
+``` 
+
+2. Now extend the model in (1) to allow variation across buildings within community district and then across community districts. Also include predictors describing the community districts. Fit this model using lmer() and interpret the coefficients at all levels.
+
+```{r,echo=FALSE}
+
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$borough)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$rodent2)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$bldg)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$race)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$personrm)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$cd)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$vacrate)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$housewgt)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$regext)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$totincom2)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$struct)==FALSE)
+apt_dt <- apt_dt%>%filter(is.na(apt_dt$dilap)==FALSE)
+
+#choosing appropriate predictors
+m5_1 <- lmer(rodent2~race+personrm+cd+vacrate+housewgt+regext+totincom2+struct+dilap+(1|bldg)+(1|borough),data=apt_dt)
+summary(m5_1)
+par(mfrow=c(2,2))
+plot(m5_1)
+```
+
+3. Compare the fit of the models in (1) and (2).
+
+```{r,echo=FALSE}
+
+anova(m5,m5_1)
+AIC(m5,m5_1)
+```
+
+## Item-response model: 
+
+the folder `exam` contains data on students' success or failure (item correct or incorrect) on a number of test items. Write the notation for an item-response model for the ability of each student and level of difficulty of each item.
+
+```{r,echo=FALSE}
+# Read in the data from an excel-format ".csv" file
+exam.data.raw <- read.table("http://www.stat.columbia.edu/~gelman/arm/examples/exam/mtermgrades.txt", header=FALSE)
+
+```
+
+##  Multilevel logistic regression 
+
+The folder `speed.dating` contains data from an experiment on a few hundred students that randomly assigned each participant to 10 short dates with participants of the opposite sex (Fisman et al., 2006). For each date, each person recorded several subjective numerical ratings of the other person (attractiveness, compatibility, and some other characteristics) and also wrote down whether he or she would like to meet the other person again. Label $y_{ij} = 1$ if person $i$ is interested in seeing person $j$ again $0$ otherwise.
+And $r_{ij1},\dots, r_{ij6}$ as person $i$'s numerical ratings of person $j$ on the dimensions of attractiveness, compatibility, and so forth.
+Please look at 
+http://www.stat.columbia.edu/~gelman/arm/examples/speed.dating/Speed%20Dating%20Data%20Key.doc
+for details.
+
+```{r}
+dating<-fread("http://www.stat.columbia.edu/~gelman/arm/examples/speed.dating/Speed%20Dating%20Data.csv")
+
+```
+
+1. Fit a classical logistic regression predicting $Pr(y_{ij} = 1)$ given person $i$'s 6 ratings of person $j$. Discuss the importance of attractiveness, compatibility, and so forth in this predictive model.
+
+```{r}
+dating_pooled <- glm(match~attr_o +sinc_o +intel_o +fun_o +amb_o +shar_o,data=dating,family=binomial)
+dating_pooled <- glmer(match~gender + attr_o +sinc_o +intel_o +fun_o +amb_o +shar_o+(1|iid)+(1|pid),data=dating,family=binomial)
+
+m1_1 <- glm(match~attr_o +sinc_o +intel_o +fun_o +amb_o +shar_o,data=dating,family=binomial(link="logit"))
+summary(m1_1)
+
+```
+
+Now let's see the goodness of fit. We found that:
+
+```{r}
+binnedplot(predict(m1_1),resid(m1_1,type = "response"))
+coefplot(m1_1,vertical=FALSE)
+```
+
+We found that our model actually fit not bad. Almost all residual plots are in the interval. 
+
+**Also, the second plot shows the importance of each coefficients, where the farthest from y=0 represents the variable having biggest influence on the response. **
+
+
+2. Expand this model to allow varying intercepts for the persons making the evaluation; that is, some people are more likely than others to want to meet someone again. Discuss the fitted model.
+
+For this request, we will use multilevel regression to fit the model.
+
+```{r}
+
+
+m1_2 <- glmer(match~gender+scale(attr_o) +scale(sinc_o) +scale(intel_o) +scale(fun_o) +scale(amb_o) +scale(shar_o)+(1|iid),data=dating,family=binomial(link="logit"))
+summary(m1_2)
+
+```
+
+From the result, we know that the function is :
+$P(match=1)=logit^{-1}(-2.13+0.15gender+0.46scale(attr)-0.02scale(sinc)+0.11scale(intel)+0.51scale(fun)-0.23scale(amb)+0.48scale(shar)+iid_{i})$
+
+
+3. Expand further to allow varying intercepts for the persons being rated. Discuss the fitted model.
+
+Now we add another multilevel:
+
+```{r}
+m1_3 <- glmer(match~gender+scale(attr_o) +scale(sinc_o) +scale(intel_o) +scale(fun_o) +scale(amb_o) +scale(shar_o)+(1|iid)+(1|pid),data=dating,family=binomial)
+summary(m1_3)
+iid <- data.frame(ranef(m1_3))[1:5,4]
+pid <- data.frame(ranef(m1_3))[552:556,4]
+iid
+pid
+```
+
+
+4. You will now fit some models that allow the coefficients for attractiveness, compatibility, and the other attributes to vary by person. Fit a no-pooling model: for each person i, fit a logistic regression to the data $y_{ij}$ for the 10 persons j whom he or she rated, using as predictors the 6 ratings $r_{ij1},\dots,r_{ij6}$ . (Hint: with 10 data points and 6 predictors, this model is difficult to fit. You will need to simplify it in some way to get reasonable fits.)
+
+First, let's fit the no-pooling model:
+
+```{r}
+m1_4 <- glm(match~scale(attr_o) +scale(sinc_o) +scale(intel_o) +scale(fun_o) +scale(amb_o) +scale(shar_o)
+ + factor(iid)-1,data=dating)
+
+```
+
+It shows that for every single iid, there is a unique intercept for it. The AIC  for this no-pooling model is 5607.8
+
+
+5. Fit a multilevel model, allowing the intercept and the coefficients for the 6 ratings to vary by the rater i.
+
+```{r}
+m1_5 <- lmer(match~(1+attr_o+sinc_o+intel_o|iid) + attr_o + sinc_o + intel_o + fun_o + amb_o + shar_o,data=dating)
+```
+
+
+
+6. Compare the inferences from the multilevel model in (5) to the no-pooling model in (4) and the complete-pooling model from part (1) of the previous exercise.
+
+```{r}
+anova(m1_5,m1_1,m1_4)
+
+```
+
+From the anova test, we can see that the deviance and the AIC of no pooling model are the lowest, which is weird.
+
+## The well-switching data described in Section 5.4 are in the folder arsenic.
+
+1. Formulate a multilevel logistic regression model predicting the probability of switching using log distance (to nearest safe well) and arsenic level and allowing intercepts to vary across villages. Fit this model using `lmer()` and discuss the results.
+
+```{r,echo=FALSE}
+
+village <- read.delim("http://www.stat.columbia.edu/~gelman/arm/examples/arsenic/Village.txt",header=TRUE,dec = ",")
+as.double(gsub(",","",village$Best.Longitude))
+ggplot(village)+geom_jitter()+aes(x=long,y=lat)
+wells <- read.table("http://www.stat.columbia.edu/~gelman/arm/examples/arsenic/wells.dat", header=TRUE)
+wells <- read.dta("http://www.stat.columbia.edu/~gelman/arm/examples/arsenic/all.dta",convert.factors=F)
+wells_f <- read.csv("http://www.stat.columbia.edu/~gelman/arm/examples/arsenic/All.csv", header=TRUE)
+wells_f <- read.csv("http://www.stat.columbia.edu/~gelman/arm/examples/arsenic/fulldata1.csv", header=TRUE)
+
+
+
+#add village to wells
+colnames(village)[1] <- "as"
+wells <- wells%>%left_join(village, by="as")
+
+#modelling
+m2_1 <- lmer(wells$switch ~ distnearest+arsenic+(1|village), data=wells,family=binomial(link="logit"))
+summary(m2_1)
+binnedplot(predict(m2_1),resid(m2_1, type = "response"))
+```
+
+From the summary and the binned plot, we know that this model is effective since the t value of fixed effects are all significant, and so are the random effects. For the binned plot, most of the bins are in the interval. 
+
+2. Extend the model in (1) to allow the coefficient on arsenic to vary across village, as well. Fit this model using `lmer()` and discuss the results.
+
+```{r,echo=FALSE}
+m2_2 <- lmer(wells$switch ~ distnearest+arsenic+(1+arsenic|village), data=wells,family=binomial(link="logit"))
+summary(m2_2)
+binnedplot(predict(m2_2),resid(m2_2, type = "response"))
+```
+
+This model fits a little better than the previous model in terms of REML criterion at convergence. Also, the binned plot looks better than the previous model.
+
+
+3. Create graphs of the probability of switching wells as a function of arsenic level for eight of the villages.
+
+```{r,echo=FALSE}
+lattice::dotplot(ranef(m2_2, condVar=TRUE))
+
+```
+
+4. Compare the fit of the models in (1) and (2).
+
+```{r,echo=FALSE}
+
+anova(m2_1,m2_2)
+AIC(m2_1,m2_2)
+```
